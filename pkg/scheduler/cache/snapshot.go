@@ -33,7 +33,7 @@ func (s *Snapshot) GetClusters() []*framework.ClusterInfo {
 func (s *Snapshot) GetReadyClusters() []*framework.ClusterInfo {
 	var readyClusterInfoList []*framework.ClusterInfo
 	for _, c := range s.clusterInfoList {
-		if util.IsClusterReady(&c.Cluster().Status) {
+		if util.IsClusterReady(&c.Cluster().Status) && c.Cluster().DeletionTimestamp.IsZero() {
 			readyClusterInfoList = append(readyClusterInfoList, c)
 		}
 	}
@@ -41,16 +41,21 @@ func (s *Snapshot) GetReadyClusters() []*framework.ClusterInfo {
 	return readyClusterInfoList
 }
 
-// GetReadyClusterNames returns the clusterNames in ready status.
-func (s *Snapshot) GetReadyClusterNames() sets.String {
+// InspectClusters returns ready/unready clusters' name.
+func (s *Snapshot) InspectClusters() (sets.String, sets.String) {
 	readyClusterNames := sets.NewString()
+	unreadyClusterNames := sets.NewString()
 	for _, c := range s.clusterInfoList {
-		if util.IsClusterReady(&c.Cluster().Status) {
-			readyClusterNames.Insert(c.Cluster().Name)
+		cluster := c.Cluster()
+		if cluster.DeletionTimestamp.IsZero() {
+			if util.IsClusterReady(&cluster.Status) {
+				readyClusterNames.Insert(cluster.Name)
+			} else {
+				unreadyClusterNames.Insert(cluster.Name)
+			}
 		}
 	}
-
-	return readyClusterNames
+	return readyClusterNames, unreadyClusterNames
 }
 
 // GetCluster returns the given clusters.

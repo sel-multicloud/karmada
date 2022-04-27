@@ -276,28 +276,31 @@ func (s *Scheduler) doScheduleBinding(namespace, name string) (err error) {
 	if policyPlacementStr != appliedPlacement {
 		// policy placement changed, need schedule
 		klog.Infof("Start to schedule ResourceBinding(%s/%s) as placement changed", namespace, name)
-		err = s.scheduleResourceBinding(rb)
+		err = s.scheduleResourceBinding(rb, true)
 		metrics.BindingSchedule(string(ReconcileSchedule), metrics.SinceInSeconds(start), err)
 		return err
 	}
 	if policyPlacement.ReplicaScheduling != nil && util.IsBindingReplicasChanged(&rb.Spec, policyPlacement.ReplicaScheduling) {
 		// binding replicas changed, need reschedule
 		klog.Infof("Reschedule ResourceBinding(%s/%s) as replicas scaled down or scaled up", namespace, name)
-		err = s.scheduleResourceBinding(rb)
+		err = s.scheduleResourceBinding(rb, false)
 		metrics.BindingSchedule(string(ScaleSchedule), metrics.SinceInSeconds(start), err)
 		return err
 	}
-	// TODO(dddddai): reschedule bindings on cluster change
-	if s.allClustersInReadyState(rb.Spec.Clusters) {
-		klog.Infof("Don't need to schedule ResourceBinding(%s/%s)", namespace, name)
-		return nil
+	exist, ready := s.allClustersInReadyState(rb.Spec.Clusters)
+	if !exist {
+		klog.Infof("Reschedule ResourceBinding(%s/%s) as cluster unjoined", namespace, name)
+		err = s.scheduleResourceBinding(rb, false)
+		// TODO(dddddai): add metrics
+		return err
 	}
-	if features.FeatureGate.Enabled(features.Failover) {
+	if !ready && features.FeatureGate.Enabled(features.Failover) {
 		klog.Infof("Reschedule ResourceBinding(%s/%s) as cluster failure", namespace, name)
-		err = s.rescheduleResourceBinding(rb)
+		err = s.scheduleResourceBinding(rb, false)
 		metrics.BindingSchedule(string(FailoverSchedule), metrics.SinceInSeconds(start), err)
 		return err
 	}
+	klog.Infof("Don't need to schedule ResourceBinding(%s/%s)", namespace, name)
 	return nil
 }
 
@@ -338,32 +341,35 @@ func (s *Scheduler) doScheduleClusterBinding(name string) (err error) {
 	if policyPlacementStr != appliedPlacement {
 		// policy placement changed, need schedule
 		klog.Infof("Start to schedule ClusterResourceBinding(%s) as placement changed", name)
-		err = s.scheduleClusterResourceBinding(crb)
+		err = s.scheduleClusterResourceBinding(crb, true)
 		metrics.BindingSchedule(string(ReconcileSchedule), metrics.SinceInSeconds(start), err)
 		return err
 	}
 	if policyPlacement.ReplicaScheduling != nil && util.IsBindingReplicasChanged(&crb.Spec, policyPlacement.ReplicaScheduling) {
 		// binding replicas changed, need reschedule
 		klog.Infof("Reschedule ClusterResourceBinding(%s) as replicas scaled down or scaled up", name)
-		err = s.scheduleClusterResourceBinding(crb)
+		err = s.scheduleClusterResourceBinding(crb, false)
 		metrics.BindingSchedule(string(ScaleSchedule), metrics.SinceInSeconds(start), err)
 		return err
 	}
-	// TODO(dddddai): reschedule bindings on cluster change
-	if s.allClustersInReadyState(crb.Spec.Clusters) {
-		klog.Infof("Don't need to schedule ClusterResourceBinding(%s)", name)
-		return nil
+	exist, ready := s.allClustersInReadyState(crb.Spec.Clusters)
+	if !exist {
+		klog.Infof("Reschedule ClusterResourceBinding(%s) as cluster unjoined", name)
+		err = s.scheduleClusterResourceBinding(crb, false)
+		// TODO(dddddai): add metrics
+		return err
 	}
-	if features.FeatureGate.Enabled(features.Failover) {
+	if !ready && features.FeatureGate.Enabled(features.Failover) {
 		klog.Infof("Reschedule ClusterResourceBinding(%s) as cluster failure", name)
-		err = s.rescheduleClusterResourceBinding(crb)
+		err = s.scheduleClusterResourceBinding(crb, false)
 		metrics.BindingSchedule(string(FailoverSchedule), metrics.SinceInSeconds(start), err)
 		return err
 	}
+	klog.Infof("Don't need to schedule ClusterResourceBinding(%s)", name)
 	return nil
 }
 
-func (s *Scheduler) scheduleResourceBinding(resourceBinding *workv1alpha2.ResourceBinding) (err error) {
+func (s *Scheduler) scheduleResourceBinding(resourceBinding *workv1alpha2.ResourceBinding, evict bool) (err error) {
 	klog.V(4).InfoS("Begin scheduling resource binding", "resourceBinding", klog.KObj(resourceBinding))
 	defer klog.V(4).InfoS("End scheduling resource binding", "resourceBinding", klog.KObj(resourceBinding))
 
@@ -371,7 +377,7 @@ func (s *Scheduler) scheduleResourceBinding(resourceBinding *workv1alpha2.Resour
 	if err != nil {
 		return err
 	}
-	scheduleResult, err := s.Algorithm.Schedule(context.TODO(), &placement, &resourceBinding.Spec)
+	scheduleResult, err := s.Algorithm.Schedule(context.TODO(), &placement, &resourceBinding.Spec, evict)
 	if err != nil {
 		klog.Errorf("Failed scheduling ResourceBinding %s/%s: %v", resourceBinding.Namespace, resourceBinding.Name, err)
 		return err
@@ -394,7 +400,7 @@ func (s *Scheduler) scheduleResourceBinding(resourceBinding *workv1alpha2.Resour
 	return nil
 }
 
-func (s *Scheduler) scheduleClusterResourceBinding(clusterResourceBinding *workv1alpha2.ClusterResourceBinding) (err error) {
+func (s *Scheduler) scheduleClusterResourceBinding(clusterResourceBinding *workv1alpha2.ClusterResourceBinding, evict bool) (err error) {
 	klog.V(4).InfoS("Begin scheduling cluster resource binding", "clusterResourceBinding", klog.KObj(clusterResourceBinding))
 	defer klog.V(4).InfoS("End scheduling cluster resource binding", "clusterResourceBinding", klog.KObj(clusterResourceBinding))
 
@@ -403,7 +409,7 @@ func (s *Scheduler) scheduleClusterResourceBinding(clusterResourceBinding *workv
 	if err != nil {
 		return err
 	}
-	scheduleResult, err := s.Algorithm.Schedule(context.TODO(), &policy.Spec.Placement, &clusterResourceBinding.Spec)
+	scheduleResult, err := s.Algorithm.Schedule(context.TODO(), &policy.Spec.Placement, &clusterResourceBinding.Spec, evict)
 	if err != nil {
 		klog.V(2).Infof("Failed scheduling ClusterResourceBinding %s: %v", clusterResourceBinding.Name, err)
 		return err
@@ -442,76 +448,25 @@ func (s *Scheduler) handleErr(err error, key interface{}) {
 	metrics.CountSchedulerBindings(metrics.ScheduleAttemptFailure)
 }
 
-func (s *Scheduler) rescheduleClusterResourceBinding(clusterResourceBinding *workv1alpha2.ClusterResourceBinding) error {
-	klog.V(4).InfoS("Begin rescheduling cluster resource binding", "clusterResourceBinding", klog.KObj(clusterResourceBinding))
-	defer klog.V(4).InfoS("End rescheduling cluster resource binding", "clusterResourceBinding", klog.KObj(clusterResourceBinding))
-
-	policyName := util.GetLabelValue(clusterResourceBinding.Labels, policyv1alpha1.ClusterPropagationPolicyLabel)
-	policy, err := s.clusterPolicyLister.Get(policyName)
-	if err != nil {
-		klog.Errorf("Failed to get policy by policyName(%s): Error: %v", policyName, err)
-		return err
-	}
-	reScheduleResult, err := s.Algorithm.FailoverSchedule(context.TODO(), &policy.Spec.Placement, &clusterResourceBinding.Spec)
-	if err != nil {
-		return err
-	}
-	if len(reScheduleResult.SuggestedClusters) == 0 {
-		return nil
-	}
-
-	clusterResourceBinding.Spec.Clusters = reScheduleResult.SuggestedClusters
-	klog.Infof("The final binding.Spec.Cluster values are: %v\n", clusterResourceBinding.Spec.Clusters)
-
-	_, err = s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Update(context.TODO(), clusterResourceBinding, metav1.UpdateOptions{})
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *Scheduler) rescheduleResourceBinding(resourceBinding *workv1alpha2.ResourceBinding) error {
-	klog.V(4).InfoS("Begin rescheduling resource binding", "resourceBinding", klog.KObj(resourceBinding))
-	defer klog.V(4).InfoS("End rescheduling resource binding", "resourceBinding", klog.KObj(resourceBinding))
-
-	placement, _, err := s.getPlacement(resourceBinding)
-	if err != nil {
-		klog.Errorf("Failed to get placement by resourceBinding(%s/%s): Error: %v", resourceBinding.Namespace, resourceBinding.Name, err)
-		return err
-	}
-	reScheduleResult, err := s.Algorithm.FailoverSchedule(context.TODO(), &placement, &resourceBinding.Spec)
-	if err != nil {
-		return err
-	}
-	if len(reScheduleResult.SuggestedClusters) == 0 {
-		return nil
-	}
-
-	resourceBinding.Spec.Clusters = reScheduleResult.SuggestedClusters
-	klog.Infof("The final binding.Spec.Cluster values are: %v\n", resourceBinding.Spec.Clusters)
-
-	_, err = s.KarmadaClient.WorkV1alpha2().ResourceBindings(resourceBinding.Namespace).Update(context.TODO(), resourceBinding, metav1.UpdateOptions{})
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *Scheduler) allClustersInReadyState(tcs []workv1alpha2.TargetCluster) bool {
+// allClustersInReadyState reports if all target clusters exist and stay ready
+func (s *Scheduler) allClustersInReadyState(tcs []workv1alpha2.TargetCluster) (exist, ready bool) {
 	clusters := s.schedulerCache.Snapshot().GetClusters()
+	count := 0
+	ready = true
 	for i := range tcs {
 		for _, c := range clusters {
 			if c.Cluster().Name == tcs[i].Name {
-				if meta.IsStatusConditionPresentAndEqual(c.Cluster().Status.Conditions, clusterv1alpha1.ClusterConditionReady, metav1.ConditionFalse) {
-					return false
+				if meta.IsStatusConditionFalse(c.Cluster().Status.Conditions, clusterv1alpha1.ClusterConditionReady) {
+					ready = false
 				}
-				continue
+				if c.Cluster().DeletionTimestamp.IsZero() {
+					count++
+				}
+				break
 			}
 		}
 	}
-	return true
+	return count == len(tcs), ready
 }
 
 func (s *Scheduler) reconcileEstimatorConnection(key util.QueueKey) error {
